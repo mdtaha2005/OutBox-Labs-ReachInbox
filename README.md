@@ -85,22 +85,25 @@ Built for the **ReachInbox Software Development Intern Assignment**.
   2. The worker re-attaches to the queue and executes due emails at the exact scheduled second.
   3. No emails are re-sent from scratch or lost.
 
-### 3. Distributed Sliding-Window Hourly Rate Limiter
+### 3. Distributed Sliding-Window Hourly Rate Limiter (Atomic Lua Script)
 - Configurable per-sender hourly quota (e.g. `200 emails/hour`).
-- Backed by Redis Sorted Sets (`rate_limit:sender:{senderId}`) tracking send timestamps.
+- **Atomic Lua Evaluation**: Evaluated using an atomic Redis Lua script (`EVAL`) that executes timestamp pruning, counting, and reservation in a single atomic transaction. This completely prevents Check-Then-Act (TOCTOU) race conditions across multiple concurrent workers or multi-instance clusters.
 - **Graceful Rescheduling**: When the limit is reached:
   - The job is **not** dropped or permanently failed.
-  - The worker calculates the exact millisecond delay until the oldest record in the 1-hour window expires and calls BullMQ's delay scheduler.
+  - The Lua script returns the exact millisecond delay until the oldest record in the 1-hour window expires, and BullMQ schedules the job for that future slot.
   - The database record transitions to `RESCHEDULED`, preserving FIFO order.
 
-### 4. Staggered Delay & Minimum Send Pacing
+### 4. Staggered Delay & Atomic Send Slot Pacing
 - **Minimum 2-Second Delay**: Staggered schedule distribution ensures individual sends are spaced by at least `delaySeconds` (configurable).
+- **Atomic Slot Reservation**: Concurrently running workers atomically reserve their target send timestamp in Redis (`delay:sender:{id}:slot`) via a Lua script. Worker 1 is assigned $T$, Worker 2 is assigned $T + 2s$, Worker 3 is assigned $T + 4s$, eliminating burst collisions.
 - **Multi-Hour Batch Ingestion**: When 1,000+ leads are scheduled at once, the algorithm partitions leads into successive 1-hour window slots automatically.
 
-### 5. Idempotency & Duplicate-Send Prevention
-- **Deterministic Job IDs**: Every BullMQ job ID is assigned `job_${emailRecord.id}`, preventing duplicate entries in Redis.
-- **Atomic DB State Locking**: Worker executes an atomic status check before dispatching SMTP calls.
-- **Sent Acknowledgment**: Updates status to `SENT` with `etherealMessageId` and `etherealPreviewUrl`.
+### 5. Idempotency & Delivery Guarantees
+- **At-Least-Once Delivery with Deduplication Guards**:
+  - **Deterministic BullMQ Job IDs**: Every job is assigned `job_${emailRecord.id}`, preventing duplicate entries in Redis.
+  - **Pre-Send Status Check**: Worker performs an atomic DB status verification before calling SMTP.
+  - **Sent Acknowledgment**: DB record updates to `SENT` with `etherealMessageId` and `etherealPreviewUrl`.
+  - **Failure Handling**: If an unhandled crash occurs between SMTP acceptance and DB update, BullMQ exponential backoff handles retries while logging progress.
 
 ---
 
@@ -314,3 +317,32 @@ npm test
    - Stop the backend server process (`Ctrl+C` or `docker stop`).
    - Wait 10 seconds, then start the server again.
    - Show that jobs remain in the queue and fire accurately at their target time without duplication.
+
+---
+
+## ⚖️ Architectural Decisions, Assumptions & Trade-offs
+
+1. **Dual-Write Consistency (PostgreSQL & Redis)**:
+   - *Design Choice*: When scheduling, DB campaign records are inserted first, followed by BullMQ batch enqueue, and an atomic rollback handler marks records as `FAILED` if Redis fails.
+   - *Trade-off*: A full Transactional Outbox pattern with Debezium/CDC was intentionally omitted to prevent unnecessary complexity and external dependencies for this 48-hour scope, while maintaining robust failure recovery.
+
+2. **At-Least-Once Delivery vs. Exactly-Once Constraints**:
+   - *Design Choice*: Due to the external nature of SMTP protocols (where a crash can occur immediately after an SMTP server accepts a message but before the database ack is recorded), the system adopts an **At-Least-Once** guarantee reinforced with pre-flight status verification and deterministic job IDs (`job_${recordId}`).
+
+3. **Multi-Worker Rate Limiting via Lua Scripting**:
+   - *Design Choice*: Instead of multi-step Node.js Redis queries, rate limiting and delay slot reservations are executed via atomic Redis Lua scripts (`EVAL`). This completely eliminates TOCTOU race conditions across parallel worker threads.
+
+4. **Security & Session Management**:
+   - *Design Choice*: Google OAuth token is exchanged server-side, encrypted into a JWT, and stored in an `HttpOnly`, `SameSite=Lax` cookie. The access token is never exposed in browser URL parameters or query strings.
+
+---
+
+## 📦 Submission Details & Assignment Form
+
+- **Collaborator Access**: Grant access on your private GitHub repository to:
+  - `Mitrajit`
+  - `Yadav036`
+- **Submission Form**: Fill the submission details at [ClickUp Assignment Submission Form](https://forms.clickup.com/9005062261/f/8cbwp3n-8876/6NNNJ92DV93PQTAYST).
+- **Features Implemented Summary Matrix**:
+  - **Backend**: Zero-cron BullMQ scheduler, Redis AOF restart persistence, Sliding-window hourly rate limiter, Multi-sender Ethereal SMTP integration, Concurrency worker engine.
+  - **Frontend**: Google OAuth 2.0 authentication, Figma-compliant Dark UI dashboard, CSV/TXT lead ingestion parser, Scheduled & Sent email queues, Live preview modal & toast notifications.

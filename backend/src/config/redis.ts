@@ -1,4 +1,4 @@
-﻿import Redis, { RedisOptions } from "ioredis";
+import { Redis, RedisOptions } from "ioredis";
 import { env } from "./env.js";
 
 export const redisConnectionOptions: RedisOptions = {
@@ -19,6 +19,6 @@ redisClient.on("connect", () => {
   console.log(`[Redis] Connected successfully to ${env.REDIS_HOST}:${env.REDIS_PORT}`);
 });
 
-redisClient.on("error", (err) => {
+redisClient.on("error", (err: Error) => {
   console.error("[Redis] Connection error:", err.message);
 });

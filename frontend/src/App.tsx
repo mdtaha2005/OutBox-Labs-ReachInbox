@@ -1,30 +1,34 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { User, EmailRecord, SenderAccount, DashboardStats } from "./types";
 import { authApi, emailApi, senderApi } from "./services/api";
-import { Header } from "./components/Header";
-import { TabNavigation } from "./components/TabNavigation";
-import { ScheduledTable } from "./components/ScheduledTable";
-import { SentTable } from "./components/SentTable";
-import { ComposeModal } from "./components/ComposeModal";
+import { Sidebar } from "./components/Sidebar";
+import { TopBar } from "./components/TopBar";
+import { ScheduledList } from "./components/ScheduledList";
+import { SentList } from "./components/SentList";
+import { ComposeView } from "./components/ComposeView";
+import { EmailDetailView } from "./components/EmailDetailView";
 import { LoginPage } from "./components/LoginPage";
 import { Toast, ToastProps } from "./components/Toast";
-import { Clock, CheckCheck, Zap, Mail } from "lucide-react";
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  // Active view & navigation
   const [activeTab, setActiveTab] = useState<"scheduled" | "sent">("scheduled");
   const [searchQuery, setSearchQuery] = useState("");
+  const [isComposeActive, setIsComposeActive] = useState(false);
+  const [selectedEmail, setSelectedEmail] = useState<EmailRecord | null>(null);
 
-  // Data lists
+  // Scheduled Queue State
   const [scheduledEmails, setScheduledEmails] = useState<EmailRecord[]>([]);
   const [scheduledTotal, setScheduledTotal] = useState(0);
   const [scheduledPage, setScheduledPage] = useState(1);
   const [scheduledTotalPages, setScheduledTotalPages] = useState(1);
   const [scheduledLoading, setScheduledLoading] = useState(false);
 
+  // Sent Emails State
   const [sentEmails, setSentEmails] = useState<EmailRecord[]>([]);
   const [sentTotal, setSentTotal] = useState(0);
   const [sentPage, setSentPage] = useState(1);
@@ -34,22 +38,15 @@ export function App() {
   const [senders, setSenders] = useState<SenderAccount[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
 
-  const [isComposeOpen, setIsComposeOpen] = useState(false);
   const [toast, setToast] = useState<Omit<ToastProps, "onClose"> | null>(null);
 
-  // Check URL parameters on mount for token or error
+  // Auth Initialization on Mount
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
-    const tokenParam = urlParams.get("token");
     const errorParam = urlParams.get("error");
 
     if (errorParam) {
       setAuthError(decodeURIComponent(errorParam));
-    }
-
-    if (tokenParam) {
-      // Clean query parameter from browser address bar
-      window.history.replaceState({}, document.title, window.location.pathname);
     }
 
     checkAuth();
@@ -76,33 +73,33 @@ export function App() {
     }
   };
 
-  const fetchScheduled = useCallback(async () => {
+  const fetchScheduled = useCallback(async (isSilent = false) => {
     if (!user) return;
-    setScheduledLoading(true);
+    if (!isSilent) setScheduledLoading(true);
     try {
-      const res = await emailApi.getScheduled(scheduledPage, 10, searchQuery);
+      const res = await emailApi.getScheduled(scheduledPage, 15, searchQuery);
       setScheduledEmails(res.data);
       setScheduledTotal(res.total);
       setScheduledTotalPages(res.totalPages || 1);
     } catch (err: any) {
       console.error("Failed to fetch scheduled emails:", err);
     } finally {
-      setScheduledLoading(false);
+      if (!isSilent) setScheduledLoading(false);
     }
   }, [user, scheduledPage, searchQuery]);
 
-  const fetchSent = useCallback(async () => {
+  const fetchSent = useCallback(async (isSilent = false) => {
     if (!user) return;
-    setSentLoading(true);
+    if (!isSilent) setSentLoading(true);
     try {
-      const res = await emailApi.getSent(sentPage, 10, searchQuery);
+      const res = await emailApi.getSent(sentPage, 15, searchQuery);
       setSentEmails(res.data);
       setSentTotal(res.total);
       setSentTotalPages(res.totalPages || 1);
     } catch (err: any) {
       console.error("Failed to fetch sent emails:", err);
     } finally {
-      setSentLoading(false);
+      if (!isSilent) setSentLoading(false);
     }
   }, [user, sentPage, searchQuery]);
 
@@ -120,27 +117,27 @@ export function App() {
     }
   }, [user]);
 
-  // Initial & Tab-switch data fetching
+  // Initial & Tab-switch data fetching (shows loading spinner only on tab change or initial load)
   useEffect(() => {
     if (user) {
       fetchStatsAndSenders();
       if (activeTab === "scheduled") {
-        fetchScheduled();
+        fetchScheduled(false);
       } else {
-        fetchSent();
+        fetchSent(false);
       }
     }
   }, [user, activeTab, fetchScheduled, fetchSent, fetchStatsAndSenders]);
 
-  // Auto-polling for live queue updates every 4 seconds
+  // Silent Auto-polling for live queue updates every 4 seconds (zero flicker)
   useEffect(() => {
     if (!user) return;
     const interval = setInterval(() => {
       fetchStatsAndSenders();
       if (activeTab === "scheduled") {
-        fetchScheduled();
+        fetchScheduled(true); // silent background update
       } else {
-        fetchSent();
+        fetchSent(true); // silent background update
       }
     }, 4000);
     return () => clearInterval(interval);
@@ -155,6 +152,9 @@ export function App() {
       });
       fetchScheduled();
       fetchStatsAndSenders();
+      if (selectedEmail?.id === id) {
+        setSelectedEmail(null);
+      }
     } catch (err: any) {
       setToast({
         type: "error",
@@ -168,14 +168,24 @@ export function App() {
       type: "success",
       message: msg,
     });
+    setIsComposeActive(false);
     fetchScheduled();
     fetchStatsAndSenders();
   };
 
+  const handleRefresh = () => {
+    fetchStatsAndSenders();
+    if (activeTab === "scheduled") {
+      fetchScheduled(false);
+    } else {
+      fetchSent(false);
+    }
+  };
+
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-[#0B0F17] flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+      <div className="min-h-screen bg-white flex items-center justify-center">
+        <div className="w-7 h-7 border-2 border-[#00B04F]/20 border-t-[#00B04F] rounded-full animate-spin" />
       </div>
     );
   }
@@ -184,97 +194,144 @@ export function App() {
     return <LoginPage error={authError} />;
   }
 
-  return (
-    <div className="min-h-screen bg-[#0B0F17] text-white flex flex-col">
-      <Header user={user} onLogout={handleLogout} />
-
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8 space-y-6">
-        {/* Metric Cards Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="p-5 rounded-2xl bg-gray-900/60 border border-gray-800 backdrop-blur-sm flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Scheduled Queue</div>
-              <div className="text-2xl font-bold text-white mt-1">{stats?.scheduledCount ?? 0}</div>
-            </div>
-            <div className="w-11 h-11 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center border border-amber-500/20">
-              <Clock className="w-5 h-5" />
-            </div>
-          </div>
-
-          <div className="p-5 rounded-2xl bg-gray-900/60 border border-gray-800 backdrop-blur-sm flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Emails Sent</div>
-              <div className="text-2xl font-bold text-white mt-1">{stats?.sentCount ?? 0}</div>
-            </div>
-            <div className="w-11 h-11 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center border border-emerald-500/20">
-              <CheckCheck className="w-5 h-5" />
-            </div>
-          </div>
-
-          <div className="p-5 rounded-2xl bg-gray-900/60 border border-gray-800 backdrop-blur-sm flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Total Campaigns</div>
-              <div className="text-2xl font-bold text-white mt-1">{stats?.totalCampaigns ?? 0}</div>
-            </div>
-            <div className="w-11 h-11 rounded-xl bg-blue-500/10 text-blue-400 flex items-center justify-center border border-blue-500/20">
-              <Mail className="w-5 h-5" />
-            </div>
-          </div>
-
-          <div className="p-5 rounded-2xl bg-gray-900/60 border border-gray-800 backdrop-blur-sm flex items-center justify-between">
-            <div>
-              <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Worker Engines</div>
-              <div className="text-2xl font-bold text-emerald-400 mt-1">5 Threads</div>
-            </div>
-            <div className="w-11 h-11 rounded-xl bg-purple-500/10 text-purple-400 flex items-center justify-center border border-purple-500/20">
-              <Zap className="w-5 h-5" />
-            </div>
-          </div>
-        </div>
-
-        {/* Tab Switcher & Search Bar */}
-        <TabNavigation
+  // Compose Fullscreen View (Matching Image 5)
+  if (isComposeActive) {
+    return (
+      <div className="min-h-screen bg-white flex">
+        <Sidebar
+          user={user}
           activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onOpenCompose={() => setIsComposeOpen(true)}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
+          onTabChange={(tab) => {
+            setIsComposeActive(false);
+            setSelectedEmail(null);
+            setActiveTab(tab);
+          }}
+          onOpenCompose={() => {
+            setSelectedEmail(null);
+            setIsComposeActive(true);
+          }}
+          onLogout={handleLogout}
           stats={stats}
         />
-
-        {/* Tab Content */}
-        {activeTab === "scheduled" ? (
-          <ScheduledTable
-            emails={scheduledEmails}
-            loading={scheduledLoading}
-            total={scheduledTotal}
-            page={scheduledPage}
-            totalPages={scheduledTotalPages}
-            onPageChange={setScheduledPage}
-            onOpenCompose={() => setIsComposeOpen(true)}
-            onCancel={handleCancelScheduled}
+        <main className="flex-1 min-h-screen bg-white">
+          <ComposeView
+            onClose={() => setIsComposeActive(false)}
+            senders={senders}
+            onScheduledSuccess={handleScheduledSuccess}
           />
-        ) : (
-          <SentTable
-            emails={sentEmails}
-            loading={sentLoading}
-            total={sentTotal}
-            page={sentPage}
-            totalPages={sentTotalPages}
-            onPageChange={setSentPage}
+        </main>
+        {toast && (
+          <Toast
+            type={toast.type}
+            message={toast.message}
+            onClose={() => setToast(null)}
           />
         )}
-      </main>
+      </div>
+    );
+  }
 
-      {/* Compose Campaign Modal */}
-      <ComposeModal
-        isOpen={isComposeOpen}
-        onClose={() => setIsComposeOpen(false)}
-        senders={senders}
-        onScheduledSuccess={handleScheduledSuccess}
+  // Email Detail View (Matching Image 4)
+  if (selectedEmail) {
+    return (
+      <div className="min-h-screen bg-white flex">
+        <Sidebar
+          user={user}
+          activeTab={activeTab}
+          onTabChange={(tab) => {
+            setSelectedEmail(null);
+            setIsComposeActive(false);
+            setActiveTab(tab);
+          }}
+          onOpenCompose={() => {
+            setSelectedEmail(null);
+            setIsComposeActive(true);
+          }}
+          onLogout={handleLogout}
+          stats={stats}
+        />
+        <main className="flex-1 min-h-screen bg-white">
+          <EmailDetailView
+            email={selectedEmail}
+            currentUser={user}
+            onBack={() => setSelectedEmail(null)}
+            onDelete={
+              selectedEmail.status !== "SENT"
+                ? handleCancelScheduled
+                : undefined
+            }
+          />
+        </main>
+        {toast && (
+          <Toast
+            type={toast.type}
+            message={toast.message}
+            onClose={() => setToast(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // Main Dashboard View (Matching Image 2 & 3)
+  return (
+    <div className="min-h-screen bg-white flex font-sans">
+      {/* Left Sidebar */}
+      <Sidebar
+        user={user}
+        activeTab={activeTab}
+        onTabChange={(tab) => {
+          setSelectedEmail(null);
+          setIsComposeActive(false);
+          setActiveTab(tab);
+        }}
+        onOpenCompose={() => {
+          setSelectedEmail(null);
+          setIsComposeActive(true);
+        }}
+        onLogout={handleLogout}
+        stats={stats}
       />
 
-      {/* Toast Alert */}
+      {/* Main Content Area */}
+      <main className="flex-1 min-h-screen bg-white flex flex-col min-w-0">
+        {/* Top Search & Action Bar */}
+        <TopBar
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          onRefresh={handleRefresh}
+          loading={activeTab === "scheduled" ? scheduledLoading : sentLoading}
+        />
+
+        {/* Tab List Content */}
+        <div className="flex-1 overflow-y-auto">
+          {activeTab === "scheduled" ? (
+            <ScheduledList
+              emails={scheduledEmails}
+              loading={scheduledLoading}
+              total={scheduledTotal}
+              page={scheduledPage}
+              totalPages={scheduledTotalPages}
+              onPageChange={setScheduledPage}
+              onSelectEmail={(email) => setSelectedEmail(email)}
+              onCancel={handleCancelScheduled}
+              onOpenCompose={() => setIsComposeActive(true)}
+            />
+          ) : (
+            <SentList
+              emails={sentEmails}
+              loading={sentLoading}
+              total={sentTotal}
+              page={sentPage}
+              totalPages={sentTotalPages}
+              onPageChange={setSentPage}
+              onSelectEmail={(email) => setSelectedEmail(email)}
+            />
+          )}
+        </div>
+      </main>
+
+      {/* Toast Notifications */}
       {toast && (
         <Toast
           type={toast.type}

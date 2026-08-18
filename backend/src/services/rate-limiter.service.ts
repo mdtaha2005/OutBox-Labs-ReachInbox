@@ -1,12 +1,56 @@
-﻿import { redisClient } from "../config/redis.js";
+import { redisClient } from "../config/redis.js";
 import { RateLimitResult } from "../types/index.js";
 
 export class RateLimiterService {
   private static WINDOW_MS = 60 * 60 * 1000; // 1 hour window
 
+  private static RATE_LIMIT_LUA = `
+    local key = KEYS[1]
+    local now = tonumber(ARGV[1])
+    local window_ms = tonumber(ARGV[2])
+    local limit = tonumber(ARGV[3])
+    local member = ARGV[4]
+    local window_start = now - window_ms
+
+    -- 1. Remove expired entries older than 1 hour window
+    redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+
+    -- 2. Count current active sends in window
+    local current_count = redis.call('ZCARD', key)
+
+    if current_count < limit then
+      -- Under limit: add send and set expiry
+      redis.call('ZADD', key, now, member)
+      redis.call('PEXPIRE', key, window_ms)
+      return {1, limit - current_count - 1, 0}
+    else
+      -- Over limit: calculate wait time until oldest send expires
+      local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+      local wait_ms = 5000
+      if #oldest >= 2 then
+        local oldest_score = tonumber(oldest[2])
+        wait_ms = math.max(oldest_score + window_ms - now + 500, 1000)
+      end
+      return {0, 0, wait_ms}
+    end
+  `;
+
+  private static DELAY_SLOT_LUA = `
+    local key = KEYS[1]
+    local now = tonumber(ARGV[1])
+    local delay_ms = tonumber(ARGV[2])
+
+    local last_slot = tonumber(redis.call('GET', key) or '0')
+    local target_slot = math.max(now, last_slot) + delay_ms
+    local ttl_ms = math.max((target_slot - now) * 2, delay_ms * 10)
+    
+    redis.call('SET', key, target_slot, 'PX', ttl_ms)
+    return target_slot
+  `;
+
   /**
    * Evaluates if a sender can send an email under the sliding-window hourly rate limit.
-   * Atomic evaluation using Redis Multi / Lua equivalent logic.
+   * Completely atomic execution via Redis Lua script (safe across concurrent workers).
    */
   static async checkAndRecordSend(
     senderId: string,
@@ -14,65 +58,52 @@ export class RateLimiterService {
   ): Promise<RateLimitResult> {
     const key = `rate_limit:sender:${senderId}`;
     const now = Date.now();
-    const windowStart = now - this.WINDOW_MS;
+    const member = `${now}:${Math.random().toString(36).substring(2, 8)}`;
 
-    // Remove expired entries older than 1 hour
-    await redisClient.zremrangebyscore(key, 0, windowStart);
+    const result = (await redisClient.eval(
+      this.RATE_LIMIT_LUA,
+      1,
+      key,
+      now.toString(),
+      this.WINDOW_MS.toString(),
+      hourlyLimit.toString(),
+      member
+    )) as [number, number, number];
 
-    // Count sends in the active window
-    const currentCount = await redisClient.zcard(key);
-
-    if (currentCount < hourlyLimit) {
-      // Add current send with unique member and timestamp as score
-      const member = `${now}:${Math.random().toString(36).substring(2, 8)}`;
-      await redisClient.zadd(key, now, member);
-      await redisClient.pexpire(key, this.WINDOW_MS);
-
-      return {
-        allowed: true,
-        remaining: hourlyLimit - currentCount - 1,
-        waitMs: 0,
-      };
-    } else {
-      // Rate limit exceeded: get the oldest send in the active window
-      const oldestEntries = await redisClient.zrange(key, 0, 0, "WITHSCORES");
-      let waitMs = 5000; // default fallback wait
-      if (oldestEntries.length >= 2) {
-        const oldestScore = parseInt(oldestEntries[1], 10);
-        waitMs = Math.max(oldestScore + this.WINDOW_MS - now + 500, 1000);
-      }
-
-      return {
-        allowed: false,
-        remaining: 0,
-        waitMs,
-      };
-    }
+    const [allowedNum, remaining, waitMs] = result;
+    return {
+      allowed: allowedNum === 1,
+      remaining,
+      waitMs,
+    };
   }
 
   /**
    * Enforces minimum delay between consecutive sends for a given sender.
-   * If last send was less than delaySeconds ago, sleeps for the remainder.
+   * Uses atomic Redis slot reservation to prevent race conditions across parallel workers.
    */
   static async enforceSenderDelay(
     senderId: string,
     delaySeconds: number
   ): Promise<void> {
-    const key = `delay:sender:${senderId}:last_sent`;
+    const key = `delay:sender:${senderId}:slot`;
     const now = Date.now();
     const minDelayMs = Math.max(delaySeconds, 1) * 1000;
 
-    const lastSentStr = await redisClient.get(key);
-    if (lastSentStr) {
-      const lastSent = parseInt(lastSentStr, 10);
-      const elapsed = now - lastSent;
-      if (elapsed < minDelayMs) {
-        const sleepMs = minDelayMs - elapsed;
-        await new Promise((resolve) => setTimeout(resolve, sleepMs));
-      }
-    }
+    const targetSlot = (await redisClient.eval(
+      this.DELAY_SLOT_LUA,
+      1,
+      key,
+      now.toString(),
+      minDelayMs.toString()
+    )) as number;
 
-    // Update last sent timestamp
-    await redisClient.set(key, Date.now().toString(), "PX", minDelayMs * 2);
+    const sendTime = targetSlot - minDelayMs;
+    const waitMs = sendTime - now;
+
+    if (waitMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 }
+

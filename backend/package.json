@@ -1,6 +1,7 @@
 {
   "name": "reachinbox-scheduler-backend",
   "version": "1.0.0",
+  "type": "module",
   "description": "Production-grade email job scheduler backend for ReachInbox",
   "main": "dist/index.js",
   "scripts": {

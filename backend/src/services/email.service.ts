@@ -1,4 +1,4 @@
-﻿import { prisma } from "../config/db.js";
+import { prisma } from "../config/db.js";
 import { env } from "../config/env.js";
 import { calculateScheduleTimes } from "../utils/scheduler.js";
 import { addEmailJobsBulk, cancelEmailJob } from "../queue/email.queue.js";
@@ -93,7 +93,7 @@ export class EmailService {
       orderBy: { scheduledAt: "asc" },
     });
 
-    // 5. Enqueue Jobs in BullMQ
+    // 5. Enqueue Jobs in BullMQ with rollback error handling
     const nowMs = Date.now();
     const queueItems = createdRecords.map((record) => {
       const targetTimeMs = record.scheduledAt.getTime();
@@ -114,17 +114,30 @@ export class EmailService {
       return { payload, delayMs };
     });
 
-    // Bulk enqueue into Redis
-    const jobIds = await addEmailJobsBulk(queueItems);
+    try {
+      // Bulk enqueue into Redis
+      const jobIds = await addEmailJobsBulk(queueItems);
 
-    // Update records with bullMqJobId
-    for (let i = 0; i < createdRecords.length; i++) {
-      const record = createdRecords[i];
-      const jobId = jobIds[i] || `job_${record.id}`;
-      await prisma.emailRecord.update({
-        where: { id: record.id },
-        data: { bullMqJobId: jobId },
+      // Update records with bullMqJobId
+      for (let i = 0; i < createdRecords.length; i++) {
+        const record = createdRecords[i];
+        const jobId = jobIds[i] || `job_${record.id}`;
+        await prisma.emailRecord.update({
+          where: { id: record.id },
+          data: { bullMqJobId: jobId },
+        });
+      }
+    } catch (queueErr: any) {
+      console.error("[EmailService] Failed to enqueue BullMQ jobs, cleaning up DB records:", queueErr.message);
+      // Mark records as failed to maintain DB consistency
+      await prisma.emailRecord.updateMany({
+        where: { campaignId: campaign.id },
+        data: {
+          status: EmailStatus.FAILED,
+          errorMessage: `Redis Queue Enqueue Error: ${queueErr.message}`,
+        },
       });
+      throw new Error(`Failed to enqueue jobs to Redis: ${queueErr.message}`);
     }
 
     return {
