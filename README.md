@@ -13,6 +13,7 @@
 
 A distributed, persistent, and rate-limited full-stack email scheduling service with an interactive outreach dashboard designed to match the ReachInbox Figma specification. Built with **Node.js, TypeScript, Express, BullMQ, Redis, PostgreSQL (Prisma), React, and Ethereal Fake SMTP**.
 
+LOOM DEMO:https://www.loom.com/share/372a3ab9ae234bbdad6d30afe86a83f2
 ---
 
 ## 📑 Table of Contents
